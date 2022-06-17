@@ -1,0 +1,141 @@
+# import the necessary packages
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.layers import AveragePooling2D
+from tensorflow.keras.layers import Dropout
+from tensorflow.keras.layers import Flatten
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.layers import Input
+from tensorflow.keras.models import Model
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
+from tensorflow.keras.preprocessing.image import img_to_array
+from tensorflow.keras.preprocessing.image import load_img
+from tensorflow.keras.utils import to_categorical
+from sklearn.preprocessing import LabelBinarizer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from imutils import paths
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+# initialize the initial learning rate, number of epochs to train for,
+# and batch size
+INIT_LR = 1e-4		# learning rate = 0.0001; lower the learning rate, sonner the accurate results using accurate loss calculation
+EPOCHS = 20			# epochs refers to the no. of times an algo. with go through the entire training dataset. We need to experiment this value and see the resultant accuracy
+BS = 32				# batch size refers to the no. of samples that algo. with go through to update internal parameters in one epoch/cycle.
+
+DIRECTORY = r"C:\Mask-Detection\Face-Mask-Detection-master\dataset"
+CATEGORIES = ["with_mask", "without_mask"]
+
+# grab the list of images in our dataset directory, then initialize
+# the list of data (i.e., images) and class images
+print("[INFO] loading images...")
+
+data = []	# append all image arrays
+labels = []	# append corresponding labelled images (with or without mask images)
+
+for category in CATEGORIES:
+    path = os.path.join(DIRECTORY, category)	# joins directory path and categories (with and without mask images)
+    for img in os.listdir(path):	# list down all the images of that particular directory
+    	img_path = os.path.join(path, img)	# joins a "directory+category" path with each images of a category
+    	image = load_img(img_path, target_size=(224, 224))	# loads an image and convert it into 224 x 224 uniform sizes
+    	image = img_to_array(image)	# converts an image into array
+    	image = preprocess_input(image)	# using this since we make use of a MobileNet model
+
+    	data.append(image)	# appends images to data list
+    	labels.append(category)	# append categories to labels list
+
+# perform one-hot encoding on the labels since labels are in string datatypes
+lb = LabelBinarizer()
+labels = lb.fit_transform(labels)
+labels = to_categorical(labels)
+
+#	convert into numpy arrays 
+data = np.array(data, dtype="float32")
+labels = np.array(labels)
+
+#	split the data and labels into training and testing datasets
+(trainX, testX, trainY, testY) = train_test_split(data, labels,
+	test_size=0.20, stratify=labels, random_state=42)	# test size = 20% of dataset images; rest 80% are for training the model
+
+# construct the training image generator for data augmentation
+aug = ImageDataGenerator(
+	rotation_range=20,
+	zoom_range=0.15,
+	width_shift_range=0.2,
+	height_shift_range=0.2,
+	shear_range=0.15,
+	horizontal_flip=True,
+	fill_mode="nearest")
+
+# load the MobileNetV2 network, ensuring the head FC layer sets are
+# left off AKA parameter include_top is set to False
+# input_tensor parameters refer to our uniform sized 224 x 224 in 3 channels for colored images
+# Creating a base model using MobileNetV2
+baseModel = MobileNetV2(weights="imagenet", include_top=False,
+	input_tensor=Input(shape=(224, 224, 3)))
+
+# construct the head of the model that will be placed on top of the
+# the base model
+headModel = baseModel.output
+headModel = AveragePooling2D(pool_size=(7, 7))(headModel)
+headModel = Flatten(name="flatten")(headModel)
+headModel = Dense(128, activation="relu")(headModel)
+headModel = Dropout(0.5)(headModel)
+headModel = Dense(2, activation="softmax")(headModel)
+
+# place the head FC model on top of the base model (this will become
+# the actual model we will train)
+model = Model(inputs=baseModel.input, outputs=headModel)
+
+# loop over all layers in the base model and freeze them so they will
+# *not* be updated during the first training process
+for layer in baseModel.layers:
+	layer.trainable = False
+
+# compile our model
+print("[INFO] compiling model...")
+opt = Adam(lr=INIT_LR, decay=INIT_LR / EPOCHS)
+model.compile(loss="binary_crossentropy", optimizer=opt,
+	metrics=["accuracy"])
+
+# train the head of the network
+print("[INFO] training head...")
+H = model.fit(
+	aug.flow(trainX, trainY, batch_size=BS),
+	steps_per_epoch=len(trainX) // BS,
+	validation_data=(testX, testY),
+	validation_steps=len(testX) // BS,
+	epochs=EPOCHS)
+
+# make predictions on the testing set
+print("[INFO] evaluating network...")
+predIdxs = model.predict(testX, batch_size=BS)
+
+# for each image in the testing set we need to find the index of the
+# label with corresponding largest predicted probability
+predIdxs = np.argmax(predIdxs, axis=1)
+
+# show a nicely formatted classification report
+print(classification_report(testY.argmax(axis=1), predIdxs,
+	target_names=lb.classes_))
+
+# serialize the model to disk
+print("[INFO] saving mask detector model...")
+model.save("mask_detector.model", save_format="h5")
+
+# plot the training loss and accuracy
+N = EPOCHS
+plt.style.use("ggplot")
+plt.figure()
+plt.plot(np.arange(0, N), H.history["loss"], label="train_loss")
+plt.plot(np.arange(0, N), H.history["val_loss"], label="val_loss")
+plt.plot(np.arange(0, N), H.history["accuracy"], label="train_acc")
+plt.plot(np.arange(0, N), H.history["val_accuracy"], label="val_acc")
+plt.title("Training Loss and Accuracy")
+plt.xlabel("Epoch #")
+plt.ylabel("Loss/Accuracy")
+plt.legend(loc="lower left")
+plt.savefig("plot.png")
